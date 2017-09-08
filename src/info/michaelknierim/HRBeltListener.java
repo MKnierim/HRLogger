@@ -7,6 +7,7 @@ import org.thingml.bglib.gui.*;
 
 import javax.swing.*;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -25,7 +26,10 @@ public class HRBeltListener extends BGAPIDefaultListener {
     protected BLEDeviceList devList = new BLEDeviceList();
     protected BLEDevice bledevice;
     private final String HR_BELT_MAC = "0:18:31:f0:ee:be";
-    private final String VALERT_MAC = "d0:39:72:c5:1:e"; // Just included for dev purposes
+
+    // Set defaults for BLED112 options (scanning, connecting, package lookup)
+    private final String PORT_NAME = "/dev/tty.usbmodem1";
+    Boolean DEBUG = false;
 
     // GATT Discovery (from BLEExplorerDialog.java)
     private static final int IDLE = 0;
@@ -41,16 +45,15 @@ public class HRBeltListener extends BGAPIDefaultListener {
     private Boolean isHRBeltConnected = false;
     private Boolean receiveBLEData = false;
 
-    // Set defaults for options (scanning, connecting, package lookup)
-    private final String PORT_NAME = "/dev/tty.usbmodem1";
-    Integer BAUD = 115200;
-    Boolean PACKET = false;
-    Boolean DEBUG = false;
+    // HR Service & Attribute Parameters
+    int att_handle_measurement = 0;
+    int att_handle_measurement_config = 0;
+    private byte[] uuid_service = new byte[]{0x28, 0x00};           // 0x2800
+    private byte[] uuid_client_characteristic_configuration = new byte[]{0x29, 0x02}; // 0x2902
+    private byte[] uuid_hr_service = new byte[]{0x18, 0x0D};        // 0x180D
+    private byte[] uuid_hr_characteristic = new byte[]{0x2A, 0x37}; // 0x2A37
 
     public HRBeltListener() {
-        // This is called first in BLEExplorerFrame.java too. Maybe important? Didn't seem to make a change though...
-        BLED112.initRXTX();
-
         // Approach to connect to BLE devices through the provided BLEExplorer GUI by bglib.
         // runExlorerFrame();
 
@@ -70,7 +73,6 @@ public class HRBeltListener extends BGAPIDefaultListener {
      * ...
      */
     private void runHRBeltDiscovery() {
-
         // Create and setup BGLIB object
         if (connectToBLED112(PORT_NAME)) {
 
@@ -78,22 +80,11 @@ public class HRBeltListener extends BGAPIDefaultListener {
             if (DEBUG) bgapi.getLowLevelDriver().addListener(bgapiLogger);
 
             // Reset.
-            // TODO: Disconnect if connected already
-            // TODO: Stop advertising if advertising already
-            bgapi.send_gap_end_procedure();     // Stop scanning if scanning already
+            resetBLED112Status();
 
             // Start scanning for BLE devices and connect to HR belt when it is available.
-            runDiscovery();
-
-            // Run Gatt Discovery // TODO: Not sure if this is needed.
-            runGATTDiscovery();
-
-            // Continuously check incoming data (in loop) // TODO: Not sure if this is needed.
-//        while (receiveBLEData) {
-//            // In python example code this calls: ble.check_activity(ser); time.sleep(0.01)
-//        }
+            discoverAndConnect();
         }
-
     }
 
     /**
@@ -133,17 +124,26 @@ public class HRBeltListener extends BGAPIDefaultListener {
     }
 
     /**
+     * ...
+     */
+    private void resetBLED112Status() {
+        // Disconnect if connected already.
+        bgapi.send_connection_disconnect(connection);
+
+        // Stop advertising if advertising already.
+        bgapi.send_gap_set_mode(0, 0);
+
+        // Stop scanning if scanning already.
+        bgapi.send_gap_end_procedure();
+    }
+
+    /**
      * This starts scanning for available BLE devices.
      */
-    private void runDiscovery() {
+    private void discoverAndConnect() {
         devList.clear();
         bgapi.send_gap_set_scan_parameters(10, 250, 1);
         bgapi.send_gap_discover(1);
-    }
-
-    // TODO: Not sure if this should be an own method. Was integrated in main code in BLEExplorerDialog.java
-    private void runGATTDiscovery() {
-        // TODO
     }
 
     /**
@@ -173,21 +173,28 @@ public class HRBeltListener extends BGAPIDefaultListener {
 
     /**
      * ...
+     *
      * @return
      */
-    private Boolean connectToHRBelt(BLEDevice hrDevice) {
-        Boolean isHRBeltConnected = false;
-
+    private void connectToHRBelt(BLEDevice hrDevice, int hrDeviceAddressType) {
         bledevice = hrDevice;
+
         if (bledevice != null) {
             logger.info("Trying to connect to HR belt now.");
-            // TODO: Should I adapt these parameters?
-            bgapi.send_gap_connect_direct(BDAddr.fromString(bledevice.getAddress()), 1, 0x3C, 0x3C, 0x64,0);
-            isHRBeltConnected = true;
-        }
 
-        // TODO: This return logic is probably not needed. Should be in response method to the connection call.
-        return isHRBeltConnected;
+            bgapi.send_gap_connect_direct(BDAddr.fromString(bledevice.getAddress()), hrDeviceAddressType, 0x3C, 0x3C, 0x64, 0);
+        }
+    }
+
+    /**
+     * Here the data collection process from the HR belt is handled.
+     */
+    private void readOutHRBeltData() {
+        // Perform service discovery
+        discovery_state = SERVICES;     // TODO: Not sure if I want to keep this.
+        logger.info("Performing service discovery now.");
+
+        bgapi.send_attclient_read_by_group_type(connection, 0x0001, 0xFFFF, getReverseByteArray(uuid_service));
     }
 
     // TODO: Not sure if I understood this correctly...
@@ -210,12 +217,18 @@ public class HRBeltListener extends BGAPIDefaultListener {
     // Callbacks for class connection (index = 3)
     @Override
     public void receive_connection_status(int conn, int flags, BDAddr address, int address_type, int conn_interval, int timeout, int latency, int bonding) {
-        logger.info("Receiving ble device connection status.");  // TODO: Remove later.
-
         if (flags != 0) {
             logger.info("Connection status received.");
             bledevice = devList.getFromAddress(address.toString());
             connection = conn;
+
+            // TODO: This if-clause is probably not required in this case.
+            // If connected, perform service discovery
+            if (bledevice.getAddress().equals(HR_BELT_MAC)) {
+                isHRBeltConnected = true;
+                // Start reading out data packets
+                readOutHRBeltData();
+            }
         } else {
             logger.info("Connection was lost!");
             connection = -1;
@@ -224,30 +237,40 @@ public class HRBeltListener extends BGAPIDefaultListener {
     }
 
     // Callbacks for class attclient (index = 4)
-    // From BLEExplorerDialog.java // TODO: Decide on integration.
     @Override
     public void receive_attributes_value(int connection, int reason, int handle, int offset, byte[] value) {
         System.out.println("Attribute Value att=" + Integer.toHexString(handle) + " val = " + bytesToString(value));
     }
 
-    // From BLEExplorerDialog.java // TODO: Decide on integration.
     @Override
     public void receive_attclient_procedure_completed(int connection, int result, int chrhandle) {
-        logger.info("Receive callback.");       // TODO: Remove later.
-
         if (discovery_state != IDLE && bledevice != null) {
             if (discovery_state == SERVICES) { // services have been discovered
                 discovery_it = bledevice.getServices().values().iterator();
                 discovery_state = ATTRIBUTES;
             }
+            // Find information on service attributes
             if (discovery_state == ATTRIBUTES) {
                 if (discovery_it.hasNext()) {
                     discovery_srv = discovery_it.next();
+                    logger.info("Attribute discorvey started.");
+
+                    // This scans for all attributes of available services.
+                    // TODO: If I want to shorten this to only look for specific attributes I do this here by passing the attribute of interest as last param.
                     bgapi.send_attclient_find_information(connection, discovery_srv.getStart(), discovery_srv.getEnd());
-                } else { // Discovery is done
-                    System.out.println("Discovery completed:");
-                    System.out.println(bledevice.getGATTDescription());
+                } else {
+                    logger.info("Service discovery completed.");
+                    logger.info(bledevice.getGATTDescription());
                     discovery_state = IDLE;
+
+                    // TODO: Integrate this with rest of the code later.
+                    // Subscribe listener to specific attribute of a service (here: HR).
+                    bgapi.send_attclient_attribute_write(connection, att_handle_measurement_config, new byte[]{0x01, 0x00});
+
+                    // TODO: Use this to read out device descriptions, etc.
+                    // Alternative approach to read by handle.
+                    // bgapi.send_attclient_read_by_handle(connection, 0x18);
+                    // bgapi.send_attributes_read(0x180D, 0);
                 }
             }
         }
@@ -256,32 +279,46 @@ public class HRBeltListener extends BGAPIDefaultListener {
         }
     }
 
-    // From BLEExplorerDialog.java // TODO: Decide on integration.
     @Override
     public void receive_attclient_group_found(int connection, int start, int end, byte[] uuid) {
-        logger.info("Receive callback.");       // TODO: Remove later.
-
+        // Collect available services.
         if (bledevice != null) {
             BLEService srv = new BLEService(uuid, start, end);
             bledevice.getServices().put(srv.getUuidString(), srv);
         }
     }
 
-    // From BLEExplorerDialog.java // TODO: Decide on integration.
     @Override
     public void receive_attclient_find_information_found(int connection, int chrhandle, byte[] uuid) {
-        logger.info("Receive callback.");       // TODO: Remove later.
-
+        // Collect available attributes of a service.
         if (discovery_state == ATTRIBUTES && discovery_srv != null) {
             BLEAttribute att = new BLEAttribute(uuid, chrhandle);
             discovery_srv.getAttributes().add(att);
+
+            // Check for heart rate measurement characteristic.
+            if (Arrays.equals(uuid, getReverseByteArray(uuid_hr_characteristic))) {
+                logger.info("Changes att_handle_measurement to: " + chrhandle);
+                att_handle_measurement = chrhandle;
+            }
+            // Check for subsequent client characteristic configuration
+            else if (Arrays.equals(uuid, getReverseByteArray(uuid_client_characteristic_configuration))
+                    && att_handle_measurement > 0) {
+                logger.info("Changes att_handle_measurement_config to: " + chrhandle);
+                att_handle_measurement_config = chrhandle;
+            }
         }
     }
 
-    // From BLEExplorerDialog.java // TODO: Decide on integration.
     @Override
     public void receive_attclient_attribute_value(int connection, int atthandle, int type, byte[] value) {
-        System.out.println("Attclient Value att=" + Integer.toHexString(atthandle) + " val = " + bytesToString(value));
+        // Check for a new value from the connected peripheral's heart rate measurement attribute.
+        if (isHRBeltConnected) {
+            int hr_flags = value[0];    // TODO: Not sure if needed or correct...
+            int hr_value = value[1];    // TODO: Not sure if needed or correct...
+
+            // System.out.println("Attclient Value att=" + Integer.toHexString(atthandle) + " val = " + bytesToString(value));
+            System.out.println("HR value: " + hr_value);
+        }
     }
 
     // Callbacks for class gap (index = 6)
@@ -289,7 +326,6 @@ public class HRBeltListener extends BGAPIDefaultListener {
     public void receive_gap_scan_response(int rssi, int packet_type, BDAddr sender, int address_type, int bond, byte[] data) {
 
         // TODO: This weirdly fails sometimes. Maybe need a way to restart the scan if there is no response being received...
-        // From BLEExplorerDialog.java
         BLEDevice d = devList.getFromAddress(sender.toString());
         if (d == null) {
             d = new BLEDevice(sender.toString());
@@ -305,11 +341,21 @@ public class HRBeltListener extends BGAPIDefaultListener {
             // When the HR belt is found, update the state variable
             if (sender.toString().equals(HR_BELT_MAC)) {
                 isHRBeltAvailable = true;
-                if (!isHRBeltConnected) connectToHRBelt(d);
+
+                // Print all values for the heart belt monitor
+                // printHRDeviceConnectionData(rssi, packet_type, sender, address_type, bond, data);
+
+                if (!isHRBeltConnected) connectToHRBelt(d, address_type);
             }
         }
     }
 
+    /**
+     * Turns byte array values into a String.
+     *
+     * @param bytes
+     * @return
+     */
     public String bytesToString(byte[] bytes) {
         StringBuffer result = new StringBuffer();
         result.append("[ ");
@@ -318,7 +364,46 @@ public class HRBeltListener extends BGAPIDefaultListener {
         return result.toString();
     }
 
+    /**
+     * Gets the current connection status.
+     *
+     * @return
+     */
     public Integer getConnection() {
         return connection;
+    }
+
+    /**
+     * ...
+     */
+    private void printHRDeviceConnectionData(int rssi, int packet_type, BDAddr sender, int address_type, int bond, byte[] data) {
+        System.out.println("Rssi: " + rssi);
+        System.out.println("Packet type: " + packet_type);
+        System.out.println("BDAddr: " + sender);
+        System.out.println("Address Type: " + address_type);
+        System.out.println("Bond: " + bond);
+        for (byte b : data) {
+            System.out.println("Data " + b);
+        }
+    }
+
+    /**
+     * ...
+     *
+     * @param inputArray
+     * @return
+     * @throws IndexOutOfBoundsException
+     */
+    private byte[] getReverseByteArray(byte[] inputArray) throws IndexOutOfBoundsException {
+        byte[] outputArray = new byte[2];
+
+        // This is used so that only the arrays of length 2 are switched.
+        if (inputArray.length != 2) throw new IndexOutOfBoundsException();
+        else {
+            outputArray[0] = inputArray[1];
+            outputArray[1] = inputArray[0];
+        }
+
+        return outputArray;
     }
 }
